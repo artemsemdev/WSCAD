@@ -1,11 +1,44 @@
-# Keep host build output out of the image: it is built for a different RID and would
-# otherwise be copied in and shadow the container's own restore/build.
+# The build context is deliberately narrow. Two reasons:
+#
+# 1. Correctness of CI change detection. The image is built from `COPY . .`, so anything
+#    reaching the context becomes an input to the image. Excluding documentation is what
+#    makes "a docs-only change cannot affect the container" a fact rather than a hope.
+# 2. Security. Nothing here is published, but the same discipline applies: no VCS history,
+#    no credentials, no local environment files ever enter a layer.
+
+# Build output — built for a different RID on the host; would shadow the container's own.
 **/bin/
 **/obj/
 **/TestResults/
+**/coverage*.xml
+**/*.trx
+
+# Version control and CI definitions: not inputs to the build.
 .git/
+.gitignore
+.github/
+
+# Documentation: not compiled, not tested, not shipped.
+*.md
+docs/
+
+# Container definitions themselves are read by the builder, not copied into the image.
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Editor and OS noise.
 .vs/
 .vscode/
 .idea/
 *.user
+*.suo
 .DS_Store
+
+# Local environment and secrets. None exist today; excluded so none can ever leak in.
+.env
+.env.*
+*.pfx
+*.snk
+*_rsa
+*.pem
