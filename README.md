@@ -69,7 +69,13 @@ Details in [docs/architecture.md](docs/architecture.md); the reasoning in
 ├── Directory.Build.props            shared compiler settings (nullable, warnings-as-errors)
 ├── Directory.Packages.props         central package versions
 ├── Dockerfile, docker-compose.yml   reproducible build + test environment
+├── global.json                      pins the SDK feature band for local/CI parity
 ├── CHANGELOG.md
+├── .github/workflows/ci.yml         dependency-aware CI (§20)
+├── scripts/
+│   ├── affected.py                  derives the dependency graph, decides what CI runs
+│   ├── test_affected.py             tests for that logic
+│   └── ci.sh                        full local validation, same commands as CI
 ├── src/
 │   ├── VectorViewer.Domain/         geometry + primitives
 │   ├── VectorViewer.Application/    viewport, render model, renderers, loader
@@ -358,3 +364,129 @@ panel.
 * An `IVectorDocumentWriter` counterpart if saving is ever needed — the same port shape.
 * Property-based tests (e.g. FsCheck) for the transform round-trip, which is a natural fit
   for `ToWorld(ToScreen(p)) == p`.
+
+## 19. Docker
+
+### What is containerised
+
+The **build and test environment** — and only that. `docker compose run --rm tests` compiles
+every project and runs the full suite in a pinned .NET 9 SDK image.
+
+```bash
+docker compose run --rm tests     # build + full suite, results in TestResults/
+docker compose run --rm shell     # same environment, interactive
+docker build --target test .      # image only
+```
+
+### What is intentionally *not* containerised, and why
+
+**The viewer itself.** The only application here is a WPF desktop app; WPF is Windows-only,
+so it cannot run in a Linux container, and X11 forwarding does not change that. There is no
+server, service or web API in this repository — so there is deliberately **no runtime stage,
+no `EXPOSE`, no published image and no registry**. Adding a slim runtime image would mean
+inventing a deployable that does not exist.
+
+The container still builds the WPF project (`EnableWindowsTargeting` makes it compile on
+Linux), so a UI-layer compile break is caught on any machine. Running it remains
+`dotnet run --project src/VectorViewer.Wpf` on Windows.
+
+The boundary, stated plainly:
+
+| | Windows only | Any OS |
+| --- | --- | --- |
+| Run the viewer | ✅ | ❌ |
+| Compile the WPF project | ✅ | ✅ (reference assemblies) |
+| Run the 164 tests | ✅ | ✅ |
+
+The image runs as root. It is an ephemeral build tool with no listener, no secrets and no
+deployment, so dropping privileges would buy nothing and would break the bind-mounted results
+directory. A future *runtime* image must not inherit that choice — the Dockerfile says so.
+
+## 20. Continuous Integration
+
+`.github/workflows/ci.yml` runs on pull requests to `master`, pushes to `master`, and
+`workflow_dispatch`. Two modes:
+
+* **Pull request — selective.** Only the jobs a change can actually affect.
+* **Push to `master` — full.** Everything, always. Selective execution is an optimisation;
+  full validation on the default branch is the safety net that makes it safe to have.
+
+### Dependency-aware propagation
+
+The decision logic is in [`scripts/affected.py`](scripts/affected.py), not in YAML, so it can
+be unit-tested and run locally (`python3 scripts/affected.py --base origin/master`). It does
+not pattern-match folder names — it *derives* the graph:
+
+* project edges from the `ProjectReference` elements in each `.csproj`;
+* asset edges from `Content Include`, which is how `samples/example.json` reaches both the
+  WPF app **and** the integration tests — an edge no folder heuristic would find;
+* container inputs from what the Dockerfile actually copies.
+
+A change is propagated through the reverse-transitive closure, so editing `Domain` does *not*
+mean "run domain tests": it runs every test project, the WPF build and the container build.
+
+Three fail-safes escalate to full validation rather than guess: a changed `.csproj` (it may
+alter the graph the analysis depends on), a changed file under `scripts/` or
+`.github/workflows/` (it defines the pipeline), and any path that cannot be attributed to a
+component. [`scripts/test_affected.py`](scripts/test_affected.py) covers all of this —
+21 tests, run in CI *before* the analysis is trusted.
+
+### CI matrix
+
+| Change | Validation |
+| --- | --- |
+| `README.md`, `docs/**`, `CHANGELOG.md` | Analysis only — no build, test or container work |
+| `Domain` | All four test projects + WPF build + container |
+| `Application` | Application, Infrastructure, Integration tests + WPF build + container |
+| `Infrastructure` (incl. the JSON reader) | Infrastructure + Integration tests + WPF build + container |
+| `WPF` | WPF build + container (the image builds the whole solution) |
+| `samples/example.json` | Integration tests + WPF build + container |
+| A test project | That test project only |
+| `Dockerfile`, `.dockerignore`, `docker-compose.yml` | Container validation |
+| `Directory.*.props`, `global.json`, `*.sln`, any `.csproj` | Full validation |
+| `scripts/**`, `.github/workflows/**` | Full validation |
+| Push to `master` | Full .NET + container validation |
+
+### Jobs
+
+`detect-changes` → then in parallel: `test` (matrix, one leg per affected test project,
+Ubuntu), `build-wpf` (**`windows-latest`**), `docker-build` (Ubuntu) → `ci-success`.
+
+**Runner choice.** Tests and the container run on Ubuntu — cheaper and faster, and nothing
+in them is Windows-specific. The WPF build runs on Windows because that is the platform the
+application ships to; the Linux compile uses reference assemblies only, so Windows is the
+authoritative check of the real toolchain and of XAML markup compilation.
+
+**One leg per test project** rather than a single job: a failure names its layer directly in
+the UI, and an unaffected layer costs nothing. Legs run in parallel and share the NuGet cache.
+
+### Caching
+
+NuGet is cached on `**/*.csproj`, `Directory.Packages.props`, `Directory.Build.props` and
+`global.json` — every input that can change what gets restored. **No build output is cached**,
+so a stale binary can never be resurrected. The container build uses BuildKit with
+`type=gha` (`mode=max`) under its own scope. Because the Dockerfile restores from project
+files before copying source, and `.dockerignore` keeps documentation out of the context, a
+docs-only change cannot invalidate a container layer — verified, not assumed.
+
+### Publishing and permissions
+
+**No image is ever pushed.** No registry is configured and nothing here is deployable, so the
+build *is* the validation. Pull requests therefore need no credentials at all, and
+`permissions: contents: read` is all any job gets. Concurrency cancels superseded pull-request
+runs but never cancels a run on `master`.
+
+No vulnerability scanner is wired in, deliberately: with no published artifact, scanning an
+SDK build tool would fail CI on CVEs in tooling that is never deployed. If a deployable
+component is added, its runtime image should be scanned and that gate documented here.
+
+### Local parity
+
+`scripts/ci.sh` reproduces the whole thing — analysis self-tests, restore, build, test,
+container build. The workflow orchestrates those same commands rather than owning any logic.
+
+### Branch protection
+
+Require the single `CI success` check. It depends on every validation job and uses
+`if: always()`, so selectively skipped jobs count as success while failures and cancellations
+fail the gate — a required check can never silently vanish because a job was filtered out.
