@@ -1,0 +1,23 @@
+# Convenience wrapper around the Dockerfile.
+#
+#   docker compose run --rm tests     build the solution and run the full suite
+#   docker compose run --rm shell     open a shell in the same environment
+#
+# The viewer itself is not available here — WPF needs Windows. See README §6.
+
+services:
+  tests:
+    build:
+      context: .
+      target: test
+    volumes:
+      # Test results land on the host so a failing run can be inspected after the
+      # container exits.
+      - ./TestResults:/testresults
+
+  shell:
+    build:
+      context: .
+      target: build
+    entrypoint: ["/bin/bash"]
+    working_dir: /src
