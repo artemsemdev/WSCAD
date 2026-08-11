@@ -19,15 +19,22 @@ public sealed class Scene
     {
         ArgumentNullException.ThrowIfNull(primitives);
 
-        // Copied so the scene cannot be mutated behind the caller's back — it is shared with
-        // the UI thread and its cached bounds must stay truthful.
+        // Copied so a later edit to the caller's collection cannot reach the scene.
         _primitives = [.. primitives];
+
+        // Wrapped so the copy cannot be edited either. Publishing the array directly would
+        // let a caller cast it back — `(IPrimitive[])scene.Primitives` — and replace an
+        // element in place, after which the cached bounds below would describe a drawing that
+        // no longer exists. The wrapper is built once here, so reading Primitives stays
+        // allocation-free on the redraw path.
+        Primitives = Array.AsReadOnly(_primitives);
+
         Bounds = ComputeBounds(_primitives);
     }
 
     public static Scene Empty { get; } = new([]);
 
-    public IReadOnlyList<IPrimitive> Primitives => _primitives;
+    public IReadOnlyList<IPrimitive> Primitives { get; }
 
     /// <summary>
     /// The smallest box containing every primitive, or <c>null</c> when the scene is empty.
