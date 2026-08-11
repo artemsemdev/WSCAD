@@ -23,6 +23,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   suite; running the viewer still requires Windows.
 - Architecture tests asserting that the domain and application layers reference no UI
   framework, so the boundary the design depends on cannot erode unnoticed.
+- Continuous integration on GitHub Actions. Pull requests run only the validation a change
+  can actually affect, derived from the real project graph rather than folder patterns;
+  pushes to `master` always run everything as a safety net. The WPF build runs on Windows,
+  the tests and container build on Linux, and a single `CI success` check is safe to require
+  in branch protection even when jobs are selectively skipped.
+- `global.json`, pinning the SDK feature band so local and CI builds resolve the same
+  toolchain.
+
+### Changed
+
+- The Docker build context no longer includes documentation, CI definitions or version
+  control history. This shrinks the context, keeps unnecessary files out of image layers,
+  and makes "a documentation change cannot affect the container" a verifiable property
+  rather than an assumption.
 
 ### Notes
 
