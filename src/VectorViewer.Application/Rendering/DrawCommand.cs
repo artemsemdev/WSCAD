@@ -44,4 +44,18 @@ public sealed record DrawEllipse(
 
 /// <summary>A closed polygon through the given vertices.</summary>
 public sealed record DrawPolygon(IReadOnlyList<ScreenPoint> Points, Appearance Appearance)
-    : DrawCommand(Appearance);
+    : DrawCommand(Appearance)
+{
+    /// <remarks>
+    /// Renderers naturally build vertices in an array, which a consumer could cast back to
+    /// and edit. The command normalises the collection itself rather than trusting every
+    /// present and future renderer to remember to wrap it. The wrapper is a view, not a copy:
+    /// this runs once per shape per frame, and the caller hands over its only reference.
+    /// </remarks>
+    public IReadOnlyList<ScreenPoint> Points { get; } = Points switch
+    {
+        ScreenPoint[] array => Array.AsReadOnly(array),
+        List<ScreenPoint> list => list.AsReadOnly(),
+        _ => Points,
+    };
+}
