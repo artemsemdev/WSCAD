@@ -11,7 +11,10 @@ namespace VectorViewer.Infrastructure.Json;
 /// </summary>
 public sealed class JsonVectorDocumentReader : IVectorDocumentReader
 {
-    private static readonly string[] Extensions = [".json"];
+    // Wrapped, not a bare array: this is static, so every reader in the process shares it.
+    // Publishing the array itself would let one consumer change which files every other
+    // reader claims to handle.
+    private static readonly IReadOnlyCollection<string> Extensions = Array.AsReadOnly([".json"]);
 
     /// <summary>Tolerant of hand-edited files; neither affects how valid documents are read.</summary>
     private static readonly JsonDocumentOptions ParseOptions = new()
