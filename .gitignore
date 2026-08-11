@@ -6,5 +6,6 @@ obj/
 *.user
 *.suo
 TestResults/
+__pycache__/
 artifacts/
 .DS_Store
