@@ -68,6 +68,8 @@ Details in [docs/architecture.md](docs/architecture.md); the reasoning in
 ├── VectorViewer.sln
 ├── Directory.Build.props            shared compiler settings (nullable, warnings-as-errors)
 ├── Directory.Packages.props         central package versions
+├── Dockerfile, docker-compose.yml   reproducible build + test environment
+├── CHANGELOG.md
 ├── src/
 │   ├── VectorViewer.Domain/         geometry + primitives
 │   ├── VectorViewer.Application/    viewport, render model, renderers, loader
@@ -110,6 +112,18 @@ the status bar shows the primitive count, the scene bounds and the current zoom.
 ```bash
 dotnet test
 ```
+
+Or, with no .NET SDK installed at all:
+
+```bash
+docker compose run --rm tests
+```
+
+That builds the whole solution — WPF included — and runs the suite in a pinned .NET 9
+image, writing `TestResults/results.trx` back to the host. `docker compose run --rm shell`
+drops into the same environment. The container cannot run the viewer itself: WPF requires
+Windows. That the *tests* run anywhere while the *UI* does not is the architecture working
+as intended.
 
 164 tests, all green, in well under a second. They run on any OS — no test project
 references WPF, which is the practical pay-off of keeping geometry out of the UI layer.
