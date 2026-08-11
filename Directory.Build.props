@@ -1,0 +1,30 @@
+<Project>
+
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Missing XML comments: documenting every public member adds noise to a sample of this size. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <NeutralLanguage>en</NeutralLanguage>
+    <!-- InvariantGlobalization is deliberately NOT set: culture independence is achieved in
+         the parsers themselves, and the tests must be able to switch to a comma-decimal
+         culture to prove it. -->
+
+  </PropertyGroup>
+
+  <!-- Allows the Windows-only presentation project to be compiled (not run) on macOS/Linux,
+       so the whole solution can be validated on any developer machine or CI agent. -->
+  <PropertyGroup>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(MSBuildProjectName)' != '' AND $(MSBuildProjectName.EndsWith('Tests'))">
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>
