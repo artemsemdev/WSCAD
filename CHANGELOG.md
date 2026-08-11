@@ -31,6 +31,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `global.json`, pinning the SDK feature band so local and CI builds resolve the same
   toolchain.
 
+### Fixed
+
+- Collections handed out across public APIs can no longer be cast back to the mutable type
+  behind them. Most importantly, a scene's primitives could previously be replaced in place
+  after construction, which left its cached bounds describing a drawing that no longer
+  existed — the viewer would fit a scene it was not showing. The same leak is closed in the
+  render model and in the reader's supported extensions, where the backing array was static
+  and therefore shared by every reader in the process.
+
 ### Changed
 
 - The Docker build context no longer includes documentation, CI definitions or version
