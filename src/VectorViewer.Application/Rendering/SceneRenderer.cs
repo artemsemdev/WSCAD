@@ -48,6 +48,8 @@ public sealed class SceneRenderer(PrimitiveRendererRegistry registry, RenderOpti
             _registry.GetRenderer(primitive).Render(primitive, context, commands);
         }
 
-        return new RenderedScene(commands, transform);
+        // Wrapped, not copied: the builder list is local and goes out of scope here, so this
+        // closes the cast-back route without allocating a second list per redraw.
+        return new RenderedScene(commands.AsReadOnly(), transform);
     }
 }
