@@ -1,0 +1,238 @@
+# Continuous integration.
+#
+# Two modes, deliberately:
+#
+#   Pull request  — selective. `detect-changes` derives the real project graph from the
+#                   .csproj files and runs only the jobs a change can actually affect.
+#   Push to the   — full. Everything runs regardless of what changed, so a mistake in the
+#   default branch  selective logic is caught before it can reach anyone else.
+#
+# Selective execution is an optimisation. Full validation on the default branch is the
+# safety net that makes the optimisation safe to have.
+#
+# The decision logic lives in scripts/affected.py (with tests in scripts/test_affected.py),
+# not in this file, so it can be reasoned about, unit-tested and run locally.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      full_validation:
+        description: Run every job regardless of what changed
+        type: boolean
+        default: true
+
+# Least privilege: nothing here writes to the repository, publishes a package or touches a
+# registry, so read access to the contents is all any job gets.
+permissions:
+  contents: read
+
+# A new push to a pull request makes the previous run obsolete. Runs on the default branch
+# are never cancelled: each merged commit must be validated on its own.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------------------
+  # Which components can this change possibly affect?
+  # ---------------------------------------------------------------------------------------
+  detect-changes:
+    name: Detect affected components
+    runs-on: ubuntu-latest
+    outputs:
+      full_validation: ${{ steps.analyse.outputs.full_validation }}
+      docs_only: ${{ steps.analyse.outputs.docs_only }}
+      run_tests: ${{ steps.analyse.outputs.run_tests }}
+      build_wpf: ${{ steps.analyse.outputs.build_wpf }}
+      build_docker: ${{ steps.analyse.outputs.build_docker }}
+      test_projects: ${{ steps.analyse.outputs.test_projects }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The analysis diffs against the merge base, which needs real history.
+          fetch-depth: 0
+
+      - name: Verify the analysis itself before trusting it
+        run: python3 scripts/test_affected.py
+
+      - name: Analyse affected components
+        id: analyse
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && \
+             [ "${{ inputs.full_validation }}" != "true" ]; then
+            python3 scripts/affected.py --base "origin/${{ github.base_ref }}"
+          else
+            # Push to the default branch, or a manual run: validate everything.
+            echo "Full validation (event: ${{ github.event_name }})."
+            python3 scripts/affected.py --full
+          fi
+
+      - name: Show the derived dependency graph
+        run: python3 scripts/affected.py --print-graph
+
+  # ---------------------------------------------------------------------------------------
+  # Tests. One leg per affected test project, so a failure names its layer in the UI, and an
+  # unaffected layer costs nothing. Legs run in parallel.
+  # ---------------------------------------------------------------------------------------
+  test:
+    name: Test ${{ matrix.project }}
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run_tests == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.detect-changes.outputs.test_projects) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          # Keyed on everything that can change what gets restored. No build output is
+          # cached, so a stale binary can never be resurrected.
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Packages.props', 'Directory.Build.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore ${{ matrix.project }}
+
+      - name: Build
+        run: dotnet build ${{ matrix.project }} --configuration Release --no-restore
+
+      - name: Test
+        run: |
+          dotnet test ${{ matrix.project }} \
+            --configuration Release \
+            --no-build \
+            --logger "trx;LogFileName=results.trx" \
+            --results-directory TestResults \
+            --collect:"XPlat Code Coverage"
+
+      - name: Upload test results
+        # Uploaded on failure too — that is when they are actually needed.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-${{ strategy.job-index }}
+          path: TestResults/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------------------
+  # WPF. Runs on Windows because that is the platform the application actually ships to.
+  # The project does compile on Linux via EnableWindowsTargeting (and the Docker job proves
+  # it), but that path resolves reference assemblies only. This job is the authoritative
+  # check of the real toolchain, including XAML markup compilation.
+  # ---------------------------------------------------------------------------------------
+  build-wpf:
+    name: Build WPF (Windows)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.build_wpf == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~\.nuget\packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Packages.props', 'Directory.Build.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore src/VectorViewer.Wpf
+
+      - name: Build
+        run: dotnet build src/VectorViewer.Wpf --configuration Release --no-restore
+
+  # ---------------------------------------------------------------------------------------
+  # Container. Built, never pushed: there is no registry and nothing deployable to publish.
+  # The build is the validation — it proves the Dockerfile, the build context and the
+  # restore/build layering still work.
+  # ---------------------------------------------------------------------------------------
+  docker-build:
+    name: Build container
+    needs: detect-changes
+    if: needs.detect-changes.outputs.build_docker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          push: false          # never from a pull request, and no registry exists anyway
+          load: true           # keep it locally so the next step can run the suite in it
+          tags: vectorviewer-ci:${{ github.sha }}
+          cache-from: type=gha,scope=vectorviewer-test
+          cache-to: type=gha,mode=max,scope=vectorviewer-test
+
+      - name: Run the suite inside the container
+        # Building the image proves it compiles; running it proves the image is actually
+        # usable, which is the thing developers rely on day to day.
+        run: |
+          mkdir -p container-results
+          docker run --rm -v "$PWD/container-results:/testresults" \
+            vectorviewer-ci:${{ github.sha }}
+
+      - name: Upload container test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: container-test-results
+          path: container-results/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------------------
+  # The single check branch protection should require.
+  #
+  # Selectively skipped jobs are a success, not a failure — but a failed or cancelled job
+  # must fail this gate. Without `if: always()` the gate would itself be skipped whenever a
+  # dependency was, and a required check that silently disappears is worse than none.
+  # ---------------------------------------------------------------------------------------
+  ci-success:
+    name: CI success
+    if: always()
+    needs: [detect-changes, test, build-wpf, docker-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify no required job failed
+        run: |
+          echo "detect-changes : ${{ needs.detect-changes.result }}"
+          echo "test           : ${{ needs.test.result }}"
+          echo "build-wpf      : ${{ needs.build-wpf.result }}"
+          echo "docker-build   : ${{ needs.docker-build.result }}"
+
+          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ]; then
+            echo "::error::At least one validation job failed."
+            exit 1
+          fi
+          if [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "::error::At least one validation job was cancelled."
+            exit 1
+          fi
+          echo "All required validation passed or was not applicable to this change."
